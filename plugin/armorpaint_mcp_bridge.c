@@ -1,7 +1,7 @@
 #include "global.h"
 
 // ============================================================================
-// armorpaint-mcp — in-app bridge (plugin half of docs/PROTOCOL.md v1)
+// armorpaint-mcp â€” in-app bridge (plugin half of docs/PROTOCOL.md v1)
 //
 // Drop this file into ArmorPaint's plugins folder and enable it in the Plugins
 // tab. It watches a spool directory for request files written by the Python MCP
@@ -38,7 +38,7 @@
 // reported by get_app_info.
 //
 // ---------------------------------------------------------------------------
-// REQUEST SHAPE — READ THIS BEFORE CHANGING THE SERVER
+// REQUEST SHAPE â€” READ THIS BEFORE CHANGING THE SERVER
 //
 // Requests are parsed with json_parse_to_map(), whose behaviour is fixed and
 // hostile (iron_json.c:297). It must be fed a FLAT, COMPACT object whose values
@@ -105,8 +105,10 @@ int MAX_LIST_ITEMS    = 64;
 int HAVE_VIEWPORT_PATCH = 0;
 
 void        *plugin;
-ui_handle_t *h_panel;
-ui_handle_t *h_enabled;
+// Newer ArmorPaint (2026-11+) UI widgets take bool* instead of ui_handle_t*,
+// and ui_handle_create() is no longer exposed to plugins.
+bool  panel_open    = false;
+bool  enabled_ui    = true;
 
 char *spool_root;
 char *dir_req;
@@ -774,7 +776,7 @@ void reply(char *id, int okflag, char *inner, int ms) {
 }
 
 // ---------------------------------------------------------------------------
-// THE DISPATCHER — one function, one else-if arm per operation.
+// THE DISPATCHER â€” one function, one else-if arm per operation.
 //
 // minic silently DROPS the 33rd function in a script (minic.c:2054, no else
 // branch, no diagnostic), so operations must never become functions.
@@ -867,9 +869,7 @@ char *dispatch(void *m) {
 		}
 		i1      = to_bool(s1);
 		enabled = i1;
-		if (h_enabled != NULL) {
-			h_enabled->b = i1; // keep the Plugins-tab checkbox in sync
-		}
+		enabled_ui = i1; // keep the Plugins-tab checkbox in sync
 		json_encode_begin();
 		json_encode_bool("enabled", enabled);
 		// Disabling stops on_update from polling AND from resetting the idle
@@ -1027,8 +1027,12 @@ char *dispatch(void *m) {
 			json_encode_string("format_version", jesc(pr->version));
 			json_encode_i32("is_bgra", pr->is_bgra);
 			json_encode_string("envmap", jesc(pr->envmap));
-			json_encode_f32("envmap_strength", pr->envmap_strength);
-			json_encode_f32("envmap_angle", pr->envmap_angle);
+			// Newer ArmorPaint: project_t envmap fields are not exposed to plugins;
+			// the live angle is on the context, the live strength is unreachable.
+			json_encode_null("envmap_strength");
+			if (c != NULL) {
+				json_encode_f32("envmap_angle", c->envmap_angle);
+			}
 			json_encode_f32("camera_fov", pr->camera_fov);
 			if (pr->assets == NULL) {
 				json_encode_i32("asset_count", 0);
@@ -1135,28 +1139,28 @@ char *dispatch(void *m) {
 		json_encode_string("path", jesc(s1));
 		if (pr != NULL) {
 			json_encode_string("envmap", jesc(pr->envmap));
-			json_encode_f32("envmap_strength", pr->envmap_strength);
+			json_encode_null("envmap_strength");
 		}
 		return json_encode_end();
 	}
 	else if (string_equals(op, "set_envmap_params")) {
-		if (pr == NULL) {
-			return fail("no_project", "no project runtime");
+		if (c == NULL) {
+			return fail("no_context", "no context runtime");
 		}
 		s1 = arg(m, "strength");
 		if (s1 != NULL) {
-			pr->envmap_strength = to_float(s1);
+			// Newer ArmorPaint keeps the live strength on scene_world, which is
+			// not exposed to plugins (project_t.envmap_strength is not either).
+			return fail("unsupported", "envmap strength is not reachable from plugins on this ArmorPaint build; only 'angle' can be set");
 		}
 		s2 = arg(m, "angle");
 		if (s2 != NULL) {
-			pr->envmap_angle = to_float(s2);
+			c->envmap_angle = to_float(s2);
 		}
-		if (c != NULL) {
-			c->ddirty = 2; // the viewport will not repaint on its own
-		}
+		c->ddirty = 2; // the viewport will not repaint on its own
 		json_encode_begin();
-		json_encode_f32("envmap_strength", pr->envmap_strength);
-		json_encode_f32("envmap_angle", pr->envmap_angle);
+		json_encode_null("envmap_strength");
+		json_encode_f32("envmap_angle", c->envmap_angle);
 		return json_encode_end();
 	}
 	else if (string_equals(op, "export_textures")) {
@@ -1375,8 +1379,8 @@ char *dispatch(void *m) {
 		json_encode_i32("brush_live", cf->brush_live);
 		json_encode_i32("node_previews", cf->node_previews);
 		json_encode_i32("material_live", cf->material_live);
-		json_encode_i32("workspace", cf->workspace);
-		json_encode_i32("workflow", cf->workflow);
+		json_encode_null("workspace");
+		json_encode_null("workflow");
 		json_encode_string("keymap", jesc(cf->keymap));
 		json_encode_string("theme", jesc(cf->theme));
 		json_encode_string("recent_projects", sa_names(cf->recent_projects, MAX_LIST_ITEMS));
@@ -1407,13 +1411,12 @@ char *dispatch(void *m) {
 		if (s1 != NULL) {
 			cf->layer_res = to_int(s1);
 		}
-		s1 = arg(m, "workspace");
-		if (s1 != NULL) {
-			cf->workspace = to_int(s1);
+		// workspace/workflow were removed from config_t in newer ArmorPaint.
+		if (arg(m, "workspace") != NULL) {
+			return fail("unsupported", "'workspace' no longer exists in this ArmorPaint build's config");
 		}
-		s1 = arg(m, "workflow");
-		if (s1 != NULL) {
-			cf->workflow = to_int(s1);
+		if (arg(m, "workflow") != NULL) {
+			return fail("unsupported", "'workflow' no longer exists in this ArmorPaint build's config");
 		}
 		s1 = arg(m, "window_scale");
 		if (s1 != NULL) {
@@ -1461,8 +1464,8 @@ char *dispatch(void *m) {
 		json_encode_i32("brush_live", cf->brush_live);
 		json_encode_i32("node_previews", cf->node_previews);
 		json_encode_i32("material_live", cf->material_live);
-		json_encode_i32("workspace", cf->workspace);
-		json_encode_i32("workflow", cf->workflow);
+		json_encode_null("workspace");
+		json_encode_null("workflow");
 		json_encode_string("keymap", jesc(cf->keymap));
 		json_encode_string("theme", jesc(cf->theme));
 		json_encode_string("note", "keymap and theme are stored but ArmorPaint applies them only on reload");
@@ -2491,10 +2494,11 @@ void on_update() {
 // state but must never be the only way to observe it -- everything here is also
 // in heartbeat.json and get_app_info.
 void on_ui() {
-	if (ui_panel(h_panel, "MCP Bridge", 0, 0, 0)) {
-		// The checkbox owns the flag. bridge_set_enabled writes h_enabled->b too,
+	if (ui_panel(&panel_open, "MCP Bridge", 0, 0, 0)) {
+		// The checkbox owns the flag. bridge_set_enabled writes enabled_ui too,
 		// so the widget and the server never disagree.
-		enabled = ui_check(h_enabled, "Enabled", "");
+		ui_check(&enabled_ui, "Enabled", "");
+		enabled = enabled_ui;
 		if (enabled) {
 			ui_text("status: listening", UI_ALIGN_LEFT, 0);
 		}
@@ -2537,9 +2541,7 @@ void on_delete() {
 // and any function defined below it is never registered.
 void main() {
 	plugin       = plugin_create();
-	h_panel      = ui_handle_create();
-	h_enabled    = ui_handle_create();
-	h_enabled->b = enabled;
+	enabled_ui   = enabled;
 
 	// data_path() is "./data" plus the platform separator, which is a backslash
 	// on Windows. Normalise it: backslashes inside minic string literals are
